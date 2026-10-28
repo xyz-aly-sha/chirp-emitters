@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#004acb">
+<title>chirp emitter</title>
+<style>
+  :root {
+    --bg: rgb(0, 74, 203);
+    --text: #ffffff;
+    --muted: #c9d8f5;
+    --accent: #f3e6a2;     /* replaced by the emitter's own colour */
+    --ink: #10213f;        /* text on the pastel buttons */
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; min-height: 100dvh; }
+
+  /* tornado wallpaper behind everything */
+  #tiles {
+    position: fixed; inset: 0; overflow: hidden; z-index: 0;
+    font-size: 26px; line-height: 1.35; letter-spacing: 2px;
+    white-space: pre; user-select: none; pointer-events: none;
+  }
+
+  /* transparent card: the tornados show through, a soft shadow keeps the text readable */
+  .card {
+    position: relative; z-index: 1;
+    width: calc(100% - 32px); max-width: 400px;
+    padding: 28px 24px 24px;
+    background: transparent;
+    text-align: center;
+    text-shadow: 0 1px 3px rgba(0, 20, 70, 0.9), 0 0 12px rgba(0, 20, 70, 0.7);
+  }
+  button, .pick a { text-shadow: none; }
+  h1 { font-size: 24px; font-weight: 700; margin: 0 0 22px; letter-spacing: 0.01em; }
+  h1 .dot { opacity: 0.7; margin: 0 0.15em; }
+
+  .ring {
+    width: 170px; height: 170px; margin: 0 auto 24px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .ring.active { border-color: var(--accent); box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 25%, transparent); }
+  .ring .status { font-size: 15px; color: var(--muted); }
+  .ring.active .status { color: var(--accent); }
+
+  button, .pick a {
+    font: inherit; font-size: 18px; font-weight: 600;
+    padding: 16px 40px; border-radius: 14px; border: none; cursor: pointer;
+    background: var(--accent); color: var(--ink);
+    width: 100%; max-width: 280px;
+  }
+  button.stop { background: #ffffff; color: var(--ink); }
+
+  .meta { margin-top: 20px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .warn { margin-top: 14px; font-size: 12px; color: #ffe9a8; display: none; }
+
+  /* chooser shown when no emitter number is given */
+  .pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px; }
+  .pick a {
+    display: flex; align-items: center; justify-content: center;
+    padding: 0; aspect-ratio: 1; max-width: none;
+    text-decoration: none; font-size: 22px;
+  }
+  .hint { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="tiles" aria-hidden="true"></div>
+
+<div class="card" id="emitter" hidden>
+  <h1>chirp emitter<span class="dot">•</span><span id="idLabel">1</span></h1>
+
+  <div class="ring" id="ring">
+    <span class="status" id="status">idle</span>
+  </div>
+
+  <button id="toggleBtn">tap to start</button>
+
+  <div class="meta">
+    sweep: <b id="freqRange">–</b><br>
+    cycle: <b id="cycleInfo">–</b>
+  </div>
+  <div class="warn" id="volWarn">Turn your volume all the way up and keep the screen on.</div>
+</div>
+
+<div class="card" id="chooser" hidden>
+  <h1>chirp emitter</h1>
+  <p class="hint">pick your number</p>
+  <div class="pick" id="pickGrid"></div>
+</div>
+
+<script>
+// ---- The 7 emitters ----
+// Each one sweeps 1000 Hz in 400 ms. Two emitters may share a band when one
+// sweeps UP and the other DOWN: a receiver's matched filter tells them apart
+// (simulated worst cross-talk between any two: 7 %).
+// 2 and 3 keep the tones of the original P2 / P3 links.
+const EMITTERS = {
+  1: { f1: 2000, f2: 3000, color: '#f4b6b6' },   // up    · soft red
+  2: { f1: 4000, f2: 5000, color: '#f6cfa5' },   // up    · peach
+  3: { f1: 7000, f2: 6000, color: '#f3e6a2' },   // down  · butter
+  4: { f1: 3000, f2: 2000, color: '#bfe5b9' },   // down  · mint
+  5: { f1: 5000, f2: 4000, color: '#a9e0dc' },   // down  · aqua
+  6: { f1: 6000, f2: 7000, color: '#c9c3f0' },   // up    · lavender
+  7: { f1: 1000, f2: 2000, color: '#ecbfe0' },   // up    · pink
+};
+
+// ---- Config via URL params ----
+// ?id=1..7 picks an emitter. f1 / f2 / period / duty / offset / label override it,
+// so old links like ?f1=4000&f2=5000&duty=40&label=P2 keep working.
+const params = new URLSearchParams(window.location.search);
+const num = (k) => { const v = parseFloat(params.get(k)); return Number.isFinite(v) ? v : null; };
+const id = '1';   // this file is emitter 1
+const preset = EMITTERS[id] || null;
+const custom = num('f1') !== null && num('f2') !== null;
+
+// ---- Tornado wallpaper ----
+const tiles = document.getElementById('tiles');
+function fillTiles() {
+  const probe = document.createElement('span');
+  probe.textContent = '🌪️';
+  tiles.appendChild(probe);
+  const w = probe.getBoundingClientRect().width || 30;
+  const h = probe.getBoundingClientRect().height || 35;
+  const cols = Math.ceil(window.innerWidth / w) + 1;
+  const rows = Math.ceil(window.innerHeight / h) + 1;
+  tiles.textContent = ('🌪️'.repeat(cols) + '\n').repeat(rows);
+}
+fillTiles();
+window.addEventListener('resize', fillTiles);
+
+if (!preset && !custom) {
+  // no emitter chosen: show the 1–7 chooser
+  const grid = document.getElementById('pickGrid');
+  for (const n in EMITTERS) {
+    const a = document.createElement('a');
+    a.href = `${n}.html`;
+    a.textContent = n;
+    a.style.background = EMITTERS[n].color;
+    grid.appendChild(a);
+  }
+  document.getElementById('chooser').hidden = false;
+} else {
+  document.getElementById('emitter').hidden = false;
+}
+
+const f1 = num('f1') ?? (preset ? preset.f1 : 4000);   // sweep start freq (Hz)
+const f2 = num('f2') ?? (preset ? preset.f2 : 5000);   // sweep end freq (Hz)
+// old links say label=P2: show just the number
+const label = (params.get('label') || (preset ? id : '?')).replace(/^p(?=\d)/i, '');
+const periodMs = num('period') ?? 1000;                // full cycle length
+const dutyPct = num('duty') ?? 40;                     // % of cycle that is the chirp (40 % -> 400 ms)
+const offsetMs = num('offset') ?? 0;                   // stagger start within cycle
+const color = (preset || EMITTERS[label] || EMITTERS[2]).color;
+
+document.documentElement.style.setProperty('--accent', color);
+if (preset || custom) document.title = `chirp emitter • ${label}`;
+document.getElementById('idLabel').textContent = label;
+document.getElementById('freqRange').textContent = `${f1} Hz → ${f2} Hz`;
+document.getElementById('cycleInfo').textContent =
+  `every ${periodMs} ms, chirp ${Math.round(periodMs * dutyPct / 100)} ms` + (offsetMs ? `, offset ${offsetMs} ms` : '');
+
+// ---- Audio engine ----
+let audioCtx = null;
+let running = false;
+let schedulerTimer = null;
+let nextChirpTime = 0;
+
+const chirpDurationSec = (periodMs * dutyPct / 100) / 1000;
+const lookaheadSec = 0.15;   // how far ahead we schedule
+const schedulerIntervalMs = 50;
+
+function scheduleChirp(startTime) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(f1, startTime);
+  osc.frequency.linearRampToValueAtTime(f2, startTime + chirpDurationSec);
+
+  // short fade in/out to avoid clicks, which also helps cross-correlation
+  const fade = Math.min(0.004, chirpDurationSec / 4);
+  gain.gain.setValueAtTime(0, startTime);
+  gain.gain.linearRampToValueAtTime(1, startTime + fade);
+  gain.gain.setValueAtTime(1, startTime + chirpDurationSec - fade);
+  gain.gain.linearRampToValueAtTime(0, startTime + chirpDurationSec);
+
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(startTime);
+  osc.stop(startTime + chirpDurationSec + 0.01);
+}
+
+function flashRing(delayMs, durMs) {
+  setTimeout(() => {
+    const ring = document.getElementById('ring');
+    ring.classList.add('active');
+    setTimeout(() => ring.classList.remove('active'), Math.max(durMs, 120));
+  }, delayMs);
+}
+
+function schedulerTick() {
+  const now = audioCtx.currentTime;
+  while (nextChirpTime < now + lookaheadSec) {
+    scheduleChirp(nextChirpTime);
+    const delayMs = Math.max(0, (nextChirpTime - now) * 1000);
+    flashRing(delayMs, chirpDurationSec * 1000);
+    nextChirpTime += periodMs / 1000;
+  }
+}
+
+// Keep the screen awake while emitting (a locked phone stops the sound)
+let wakeLock = null;
+async function keepAwake() {
+  if (!('wakeLock' in navigator)) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+
+function start() {
+  // iPhone: play even when the silent switch is on (Safari 17+)
+  if (navigator.audioSession) { try { navigator.audioSession.type = 'playback'; } catch (e) {} }
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  running = true;
+  nextChirpTime = audioCtx.currentTime + offsetMs / 1000 + 0.1;
+  schedulerTick();
+  schedulerTimer = setInterval(schedulerTick, schedulerIntervalMs);
+  keepAwake();
+
+  document.getElementById('status').textContent = 'emitting';
+  document.getElementById('toggleBtn').textContent = 'stop';
+  document.getElementById('toggleBtn').classList.add('stop');
+  document.getElementById('volWarn').style.display = 'block';
+}
+
+function stop() {
+  running = false;
+  clearInterval(schedulerTimer);
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  document.getElementById('status').textContent = 'idle';
+  document.getElementById('ring').classList.remove('active');
+  document.getElementById('toggleBtn').textContent = 'tap to start';
+  document.getElementById('toggleBtn').classList.remove('stop');
+  document.getElementById('volWarn').style.display = 'none';
+}
+
+document.getElementById('toggleBtn').addEventListener('click', () => {
+  running ? stop() : start();
+});
+
+// the wake lock is dropped when the page is hidden; take it again on return
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible') keepAwake();
+});
+</script>
+
+</body>
+</html>
